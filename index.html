@@ -1,1 +1,163 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>YouTube MP3 Downloader</title>
+    <!-- Подключаем SDK Telegram Mini Apps -->
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        }
+
+        body {
+            /* Используем переменные темы Telegram */
+            background-color: var(--tg-theme-bg-color, #121212);
+            color: var(--tg-theme-text-color, #ffffff);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .card {
+            background-color: var(--tg-theme-secondary-bg-color, #1e1e1e);
+            padding: 25px;
+            border-radius: 16px;
+            width: 100%;
+            max-width: 400px;
+            text-align: center;
+        }
+
+        h1 {
+            font-size: 20px;
+            margin-bottom: 20px;
+            color: var(--tg-theme-button-color, #ff4d4d);
+        }
+
+        .input-box {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        input[type="text"] {
+            width: 100%;
+            padding: 14px;
+            border: 1px solid #333;
+            border-radius: 10px;
+            background-color: var(--tg-theme-bg-color, #2a2a2a);
+            color: var(--tg-theme-text-color, #fff);
+            font-size: 15px;
+            outline: none;
+        }
+
+        button {
+            width: 100%;
+            padding: 14px;
+            background-color: var(--tg-theme-button-color, #ff4d4d);
+            color: var(--tg-theme-button-text-color, #ffffff);
+            border: none;
+            border-radius: 10px;
+            font-size: 15px;
+            font-weight: 600;
+            cursor: pointer;
+        }
+
+        button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+
+        #status {
+            margin-top: 15px;
+            font-size: 14px;
+            word-break: break-word;
+        }
+
+        .success { color: #4ed964; }
+        .error { color: #ff4d4d; }
+        .info { color: #aaa; }
+    </style>
+</head>
+<body>
+
+    <div class="card">
+        <h1>YouTube MP3 Downloader</h1>
+        <div class="input-box">
+            <input type="text" id="urlInput" placeholder="Вставьте ссылку на YouTube...">
+            <button id="downloadBtn" onclick="processDownload()">Скачать MP3</button>
+        </div>
+        <div id="status" class="info"></div>
+    </div>
+
+    <script>
+        // Инициализируем Telegram Web App
+        const tg = window.Telegram.WebApp;
+        tg.expand(); // Разворачиваем приложение на весь экран
+
+        function extractVideoId(url) {
+            const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|\&v=)([^#\&\?]*).*/;
+            const match = url.match(regExp);
+            return (match && match[2].length === 11) ? match[2] : null;
+        }
+
+        async function processDownload() {
+            const urlInput = document.getElementById('urlInput').value.trim();
+            const status = document.getElementById('status');
+            const btn = document.getElementById('downloadBtn');
+
+            const videoId = extractVideoId(urlInput);
+
+            if (!videoId) {
+                status.className = 'error';
+                status.innerText = 'Некорректная ссылка!';
+                return;
+            }
+
+            btn.disabled = true;
+            status.className = 'info';
+            status.innerText = 'Запрос к API...';
+
+            try {
+                const response = await fetch('https://api.cobalt.tools/api/json', {
+                    method: 'POST',
+                    headers: {
+                        'Accept': 'application/json',
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        url: urlInput,
+                        downloadMode: 'audio',
+                        audioFormat: 'mp3'
+                    })
+                });
+
+                const data = await response.json();
+
+                if (data.url) {
+                    status.className = 'success';
+                    status.innerText = 'Ссылка готова! Открываю скачивание...';
+                    
+                    // В Telegram Mini App скачивание лучше производить через открытие внешнего URL
+                    tg.openLink(data.url);
+                } else {
+                    throw new Error('Не удалось получить файл');
+                }
+            } catch (err) {
+                status.className = 'error';
+                status.innerText = 'Ошибка скачивания.';
+            } finally {
+                btn.disabled = false;
+            }
+        }
+    </script>
+
+</body>
+</html>
 
