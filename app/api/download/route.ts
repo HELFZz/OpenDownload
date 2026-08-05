@@ -12,6 +12,34 @@ const SAFE_FORMAT = /^[\w+\-.[\]<=>*]{1,80}$/
 
 const AUDIO_FORMATS = new Set(["mp3", "opus", "m4a", "wav", "flac"])
 
+const MIME: Record<string, string> = {
+  mp4: "video/mp4",
+  mkv: "video/x-matroska",
+  webm: "video/webm",
+  mp3: "audio/mpeg",
+  opus: "audio/opus",
+  m4a: "audio/mp4",
+  wav: "audio/wav",
+  flac: "audio/flac",
+}
+
+/** Аргументы ffmpeg для настоящей перекодировки в выбранный формат. */
+function audioEncoderArgs(format: string): string[] {
+  switch (format) {
+    case "mp3":
+      return ["-c:a", "libmp3lame", "-b:a", "320k", "-f", "mp3"]
+    case "opus":
+      return ["-c:a", "libopus", "-b:a", "192k", "-f", "opus"]
+    case "flac":
+      return ["-c:a", "flac", "-f", "flac"]
+    case "wav":
+      return ["-c:a", "pcm_s16le", "-f", "wav"]
+    default:
+      // m4a: дорожка YouTube уже AAC, копируем без потери качества.
+      return ["-c:a", "copy", "-movflags", "frag_keyframe+empty_moov", "-f", "mp4"]
+  }
+}
+
 function safeFilename(name: string, ext: string) {
   const cleaned = name
     .replace(/[/\\?%*:|"<>\u0000-\u001f]/g, "")
@@ -61,14 +89,20 @@ export async function GET(request: NextRequest) {
 
   let ext: string
   if (wantsAudio) {
-    // -x извлекает звук и перекодирует его в выбранный контейнер.
-    args.push("-f", format === "best" ? "ba/b" : format, "-x", "--audio-format", audioFormat, "--audio-quality", "0")
+    // Извлекаем исходную дорожку, перекодировку делаем сами в ffmpeg (см. ниже):
+    // потоковый `-x` пишет контейнер, который нельзя досоздать в stdout.
+    args.push("-f", format === "best" ? "ba/b" : format)
     ext = audioFormat
   } else {
     args.push("-f", format)
-    // Склейка двух дорожек всегда даёт mp4, одиночный поток остаётся как есть.
-    ext = format.includes("+") ? "mp4" : (params.get("ext") ?? "mp4")
-    if (format.includes("+")) args.push("--merge-output-format", "mp4")
+    if (format.includes("+")) {
+      // mp4 в stdout нельзя финализировать (moov-атом пишется в конец), поэтому
+      // склеенные дорожки отдаём в matroska — он потоковый по своей природе.
+      ext = "mkv"
+      args.push("--merge-output-format", "mkv")
+    } else {
+      ext = params.get("ext") ?? "mp4"
+    }
   }
   args.push(url)
 
@@ -78,6 +112,22 @@ export async function GET(request: NextRequest) {
   child.stderr.on("data", (chunk) => {
     if (stderr.length < 4000) stderr += String(chunk)
   })
+
+  // Аудио: гоним поток yt-dlp через ffmpeg, чтобы на выходе был настоящий кодек.
+  let encoder: ReturnType<typeof spawn> | null = null
+  if (wantsAudio && ffmpeg) {
+    encoder = spawn(ffmpeg, ["-v", "error", "-i", "pipe:0", "-vn", ...audioEncoderArgs(audioFormat), "pipe:1"], {
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+    encoder.stderr?.on("data", (chunk) => {
+      if (stderr.length < 4000) stderr += String(chunk)
+    })
+    child.stdout.pipe(encoder.stdin!)
+    // Обрыв пайпа при отмене — это норма, глушим шум в логах.
+    encoder.stdin!.on("error", () => {})
+  }
+
+  const source = encoder ?? child
 
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
@@ -89,29 +139,35 @@ export async function GET(request: NextRequest) {
         else controller.close()
       }
 
-      child.stdout.on("data", (chunk: Buffer) => {
+      const killAll = () => {
+        child.kill("SIGKILL")
+        encoder?.kill("SIGKILL")
+      }
+
+      source.stdout!.on("data", (chunk: Buffer) => {
         try {
           controller.enqueue(new Uint8Array(chunk))
         } catch {
-          child.kill("SIGKILL")
+          killAll()
         }
       })
-      child.stdout.on("end", () => finish())
-      child.on("error", (error) => finish(error))
-      child.on("close", (code) => {
+      source.stdout!.on("end", () => finish())
+      source.on("error", (error) => finish(error))
+      source.on("close", (code) => {
         if (code === 0) return finish()
         console.log("[v0] download failed, code", code, stderr.slice(0, 400))
         finish(new Error("Скачивание прервалось"))
       })
 
-      // Пользователь закрыл вкладку — не держим процесс зря.
+      // Пользователь закрыл вкладку — не держим процессы зря.
       request.signal.addEventListener("abort", () => {
-        child.kill("SIGKILL")
+        killAll()
         finish()
       })
     },
     cancel() {
       child.kill("SIGKILL")
+      encoder?.kill("SIGKILL")
     },
   })
 
@@ -119,7 +175,7 @@ export async function GET(request: NextRequest) {
   return new Response(stream, {
     headers: {
       // Размер заранее неизвестен: поток формируется на ходу.
-      "Content-Type": wantsAudio ? `audio/${audioFormat === "m4a" ? "mp4" : audioFormat}` : "video/mp4",
+      "Content-Type": MIME[ext] ?? "application/octet-stream",
       "Content-Disposition": `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`,
       "Cache-Control": "no-store",
       "X-Content-Type-Options": "nosniff",

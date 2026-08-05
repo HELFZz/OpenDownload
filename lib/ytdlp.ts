@@ -180,7 +180,8 @@ export async function getMediaInfo(url: string): Promise<MediaInfo> {
         kind: "video" as const,
         label: height >= 2160 ? "4K" : height >= 1440 ? "1440p" : `${height}p`,
         detail: parts.join(" · "),
-        ext: needsMux ? "mp4" : (f.ext ?? "mp4"),
+        // Склеенные дорожки отдаются в mkv: mp4 нельзя финализировать в потоке.
+        ext: needsMux ? "mkv" : (f.ext ?? "mp4"),
         needsMux,
         height,
         size: totalSize,

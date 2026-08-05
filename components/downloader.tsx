@@ -1,46 +1,70 @@
 "use client"
 
 import { useMemo, useState } from "react"
-import { AlertCircle, ArrowDownToLine, CheckCircle2, Link2, Loader2, Music4, Video } from "lucide-react"
-import { type InstanceConfig, InstanceSettings } from "@/components/instance-settings"
+import { AlertCircle, ArrowDownToLine, AudioLines, CheckCircle2, Link2, Loader2, Music4, Video } from "lucide-react"
 import { OptionRow } from "@/components/option-row"
+import { detectService, isValidUrl } from "@/lib/services"
 import { useTelegram } from "@/lib/use-telegram"
-import {
-  AUDIO_BITRATES,
-  AUDIO_FORMATS,
-  detectService,
-  isValidUrl,
-  VIDEO_CODECS,
-  VIDEO_QUALITIES,
-} from "@/lib/services"
 
 type Mode = "video" | "audio"
 
-type PickerItem = { type: string; url: string; thumb: string | null; filename: string }
+type Format = {
+  id: string
+  kind: Mode
+  label: string
+  detail: string
+  ext: string
+  needsMux: boolean
+  height?: number
+  bitrate?: number
+  size?: number
+}
 
-type Result =
-  | { kind: "file"; url: string; filename: string; service: string }
-  | { kind: "picker"; items: PickerItem[]; audio: string | null; service: string }
+type MediaInfo = {
+  title: string
+  uploader?: string
+  duration?: number
+  thumbnail?: string
+  extractor: string
+  isLive: boolean
+  video: Format[]
+  audio: Format[]
+}
+
+type Result = { info: MediaInfo; canMux: boolean; service: string; url: string }
 
 type Feedback = { tone: "error" | "success" | "info"; text: string } | null
+
+/** Целевой контейнер аудио: пустая строка — оставить исходный кодек. */
+const AUDIO_TARGETS = [
+  { value: "", label: "Как в источнике" },
+  { value: "mp3", label: "MP3 320" },
+  { value: "opus", label: "Opus" },
+  { value: "flac", label: "FLAC" },
+  { value: "wav", label: "WAV" },
+]
+
+function formatDuration(seconds?: number) {
+  if (!seconds) return null
+  const hours = Math.floor(seconds / 3600)
+  const minutes = Math.floor((seconds % 3600) / 60)
+  const secs = Math.floor(seconds % 60)
+  const pad = (value: number) => String(value).padStart(2, "0")
+  return hours > 0 ? `${hours}:${pad(minutes)}:${pad(secs)}` : `${minutes}:${pad(secs)}`
+}
 
 export function Downloader() {
   const { isTelegram, saveFile, haptic } = useTelegram()
 
   const [url, setUrl] = useState("")
   const [mode, setMode] = useState<Mode>("video")
-  const [videoQuality, setVideoQuality] = useState("1080")
-  const [videoCodec, setVideoCodec] = useState("h264")
-  const [audioFormat, setAudioFormat] = useState("mp3")
-  const [audioBitrate, setAudioBitrate] = useState("320")
-  const [instance, setInstance] = useState<InstanceConfig>({ url: "", apiKey: "" })
+  const [audioTarget, setAudioTarget] = useState("mp3")
   const [loading, setLoading] = useState(false)
+  const [busyId, setBusyId] = useState<string | null>(null)
   const [feedback, setFeedback] = useState<Feedback>(null)
   const [result, setResult] = useState<Result | null>(null)
 
   const service = useMemo(() => (url.trim() ? detectService(url) : null), [url])
-  const audioOnlyService = service ? service.audio && !service.video : false
-  const effectiveMode: Mode = audioOnlyService ? "audio" : mode
 
   async function handleSubmit(event: React.FormEvent) {
     event.preventDefault()
@@ -55,23 +79,14 @@ export function Downloader() {
 
     setLoading(true)
     setResult(null)
-    setFeedback({ tone: "info", text: "Обрабатываем ссылку..." })
+    setFeedback({ tone: "info", text: "Читаем ссылку и собираем форматы..." })
     haptic("tap")
 
     try {
-      const response = await fetch("/api/resolve", {
+      const response = await fetch("/api/info", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          url,
-          instance: instance.url,
-          apiKey: instance.apiKey,
-          downloadMode: effectiveMode === "audio" ? "audio" : "auto",
-          videoQuality,
-          youtubeVideoCodec: videoCodec,
-          audioFormat,
-          audioBitrate,
-        }),
+        body: JSON.stringify({ url }),
       })
       const data = await response.json()
 
@@ -81,25 +96,17 @@ export function Downloader() {
         return
       }
 
-      if (data.kind === "picker") {
-        setResult({ kind: "picker", items: data.items, audio: data.audio, service: data.service })
-        setFeedback({ tone: "success", text: "Найдено несколько файлов — выберите нужные." })
-        haptic("success")
-        return
-      }
+      const info = data.info as MediaInfo
+      setResult({ info, canMux: data.canMux, service: data.service, url: url.trim() })
+      setMode(info.video.length > 0 ? "video" : "audio")
 
-      const file: Result = { kind: "file", url: data.url, filename: data.filename, service: data.service }
-      setResult(file)
-      const how = saveFile(file.url, file.filename)
-      setFeedback({
-        tone: "success",
-        text:
-          how === "telegram-native"
-            ? "Файл готов — подтвердите загрузку в Telegram."
-            : how === "telegram-browser"
-              ? "Файл готов — загрузка открыта во внешнем браузере."
-              : "Файл готов — загрузка началась.",
-      })
+      if (info.isLive) {
+        setFeedback({ tone: "info", text: "Это прямой эфир: запись пойдёт с текущего момента, остановите её вручную." })
+      } else if (!data.canMux) {
+        setFeedback({ tone: "info", text: "ffmpeg недоступен: качества со отдельной звуковой дорожкой и конвертация выключены." })
+      } else {
+        setFeedback({ tone: "success", text: "Форматы готовы — выберите нужный." })
+      }
       haptic("success")
     } catch {
       setFeedback({ tone: "error", text: "Сеть недоступна. Попробуйте ещё раз." })
@@ -108,6 +115,32 @@ export function Downloader() {
       setLoading(false)
     }
   }
+
+  function startDownload(format: Format) {
+    if (!result) return
+    haptic("tap")
+    setBusyId(format.id)
+
+    const params = new URLSearchParams({
+      url: result.url,
+      format: format.id,
+      ext: format.ext,
+      title: result.info.title,
+    })
+    if (format.kind === "audio" && audioTarget) params.set("audioFormat", audioTarget)
+
+    const ext = format.kind === "audio" && audioTarget ? audioTarget : format.ext
+    // Сервер собирает файл на ходу и отдаёт его потоком с Content-Disposition.
+    saveFile(`/api/download?${params.toString()}`, `${result.info.title}.${ext}`)
+
+    setFeedback({
+      tone: "success",
+      text: isTelegram ? "Файл готов — подтвердите загрузку в Telegram." : "Загрузка началась. Большие файлы собираются на ходу.",
+    })
+    setTimeout(() => setBusyId(null), 2500)
+  }
+
+  const formats = result ? (mode === "video" ? result.info.video : result.info.audio) : []
 
   return (
     <section className="flex w-full max-w-md flex-col gap-4">
@@ -137,55 +170,6 @@ export function Downloader() {
             </p>
           )}
 
-          {/* Режим */}
-          <div className="flex gap-1.5">
-            {(
-              [
-                { value: "video", label: "Видео", icon: Video },
-                { value: "audio", label: "Аудио", icon: Music4 },
-              ] as const
-            ).map((item) => {
-              const active = effectiveMode === item.value
-              const disabled = item.value === "video" && audioOnlyService
-              return (
-                <button
-                  key={item.value}
-                  type="button"
-                  disabled={disabled}
-                  onClick={() => setMode(item.value)}
-                  aria-pressed={active}
-                  className={[
-                    "flex flex-1 items-center justify-center gap-2 rounded-lg border px-3 py-2.5 text-sm transition-colors",
-                    "disabled:cursor-not-allowed disabled:opacity-40",
-                    active ? "border-accent bg-accent text-accent-foreground" : "border-border bg-surface-2 text-muted",
-                  ].join(" ")}
-                >
-                  <item.icon className="size-4" aria-hidden="true" />
-                  {item.label}
-                </button>
-              )
-            })}
-          </div>
-
-          {/* Параметры */}
-          {effectiveMode === "video" ? (
-            <div className="flex flex-col gap-4">
-              <OptionRow label="Качество" options={VIDEO_QUALITIES} value={videoQuality} onChange={setVideoQuality} />
-              <OptionRow label="Кодек (YouTube)" options={VIDEO_CODECS} value={videoCodec} onChange={setVideoCodec} />
-            </div>
-          ) : (
-            <div className="flex flex-col gap-4">
-              <OptionRow label="Формат" options={AUDIO_FORMATS} value={audioFormat} onChange={setAudioFormat} />
-              <OptionRow
-                label="Битрейт"
-                options={AUDIO_BITRATES}
-                value={audioBitrate}
-                onChange={setAudioBitrate}
-                disabled={audioFormat === "best" || audioFormat === "wav"}
-              />
-            </div>
-          )}
-
           <button
             type="submit"
             disabled={loading}
@@ -196,7 +180,7 @@ export function Downloader() {
             ) : (
               <ArrowDownToLine className="size-4" aria-hidden="true" />
             )}
-            {loading ? "Обработка" : effectiveMode === "audio" ? "Скачать аудио" : "Скачать видео"}
+            {loading ? "Читаем" : "Показать форматы"}
           </button>
         </div>
       </form>
@@ -218,11 +202,7 @@ export function Downloader() {
           ) : (
             <span className="mt-1 flex h-3.5 items-end gap-0.5" aria-hidden="true">
               {[0, 1, 2].map((index) => (
-                <span
-                  key={index}
-                  className="bar block w-0.5 bg-accent"
-                  style={{ height: "100%", animationDelay: `${index * 0.15}s` }}
-                />
+                <span key={index} className="bar block w-0.5 bg-accent" style={{ height: "100%", animationDelay: `${index * 0.15}s` }} />
               ))}
             </span>
           )}
@@ -230,50 +210,121 @@ export function Downloader() {
         </div>
       )}
 
-      {/* Повторное скачивание / выбор из нескольких файлов */}
-      {result?.kind === "file" && (
-        <button
-          type="button"
-          onClick={() => saveFile(result.url, result.filename)}
-          className="flex items-center justify-between gap-3 rounded-[var(--radius)] border bg-surface p-3 text-left text-sm"
-        >
-          <span className="truncate font-mono text-xs text-foreground">{result.filename}</span>
-          <span className="shrink-0 font-mono text-[11px] uppercase tracking-widest text-accent">Скачать снова</span>
-        </button>
-      )}
-
-      {result?.kind === "picker" && (
-        <div className="flex flex-col gap-2 rounded-[var(--radius)] border bg-surface p-3">
-          {result.audio && (
-            <button
-              type="button"
-              onClick={() => saveFile(result.audio as string, "audio.mp3")}
-              className="rounded-lg border border-accent px-3 py-2 text-left font-mono text-xs text-accent"
-            >
-              Скачать аудиодорожку
-            </button>
-          )}
-          <div className="grid grid-cols-3 gap-2">
-            {result.items.map((item, index) => (
-              <button
-                key={`${item.url}-${index}`}
-                type="button"
-                onClick={() => saveFile(item.url, `${index + 1}.${item.type === "photo" ? "jpg" : "mp4"}`)}
-                className="flex aspect-square flex-col items-center justify-center gap-1 rounded-lg border bg-surface-2 font-mono text-[11px] text-muted"
-              >
-                <ArrowDownToLine className="size-4" aria-hidden="true" />
-                {item.type === "photo" ? "фото" : "видео"} {index + 1}
-              </button>
-            ))}
+      {/* Найденная запись */}
+      {result && (
+        <div className="flex flex-col gap-4 rounded-[var(--radius)] border bg-surface p-4">
+          <div className="flex gap-3">
+            {result.info.thumbnail && (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={result.info.thumbnail || "/placeholder.svg"}
+                alt=""
+                crossOrigin="anonymous"
+                className="h-16 w-24 shrink-0 rounded-lg border object-cover"
+              />
+            )}
+            <div className="min-w-0 flex-1">
+              <p className="line-clamp-2 text-sm font-medium leading-snug text-foreground">{result.info.title}</p>
+              <p className="mt-1 truncate font-mono text-[11px] text-muted">
+                {[result.info.uploader, formatDuration(result.info.duration), result.service].filter(Boolean).join(" · ")}
+              </p>
+            </div>
           </div>
+
+          {/* Видео / Аудио */}
+          <div className="flex gap-1.5" role="tablist" aria-label="Тип файла">
+            {(
+              [
+                { value: "video", label: "Видео", icon: Video, count: result.info.video.length },
+                { value: "audio", label: "Аудио", icon: Music4, count: result.info.audio.length },
+              ] as const
+            ).map((item) => {
+              const active = mode === item.value
+              return (
+                <button
+                  key={item.value}
+                  type="button"
+                  role="tab"
+                  aria-selected={active}
+                  disabled={item.count === 0}
+                  onClick={() => setMode(item.value)}
+                  className={[
+                    "flex flex-1 items-center justify-center gap-2 rounded-lg border px-3 py-2.5 text-sm transition-colors",
+                    "disabled:cursor-not-allowed disabled:opacity-40",
+                    active ? "border-accent bg-accent text-accent-foreground" : "border-border bg-surface-2 text-muted",
+                  ].join(" ")}
+                >
+                  <item.icon className="size-4" aria-hidden="true" />
+                  {item.label}
+                </button>
+              )
+            })}
+          </div>
+
+          {mode === "audio" && result.info.audio.length > 0 && (
+            <OptionRow
+              label="Конвертировать в"
+              options={AUDIO_TARGETS.map((target) => ({
+                ...target,
+                disabled: target.value !== "" && !result.canMux,
+              }))}
+              value={audioTarget}
+              onChange={setAudioTarget}
+            />
+          )}
+
+          {/* Список форматов */}
+          <ul className="flex flex-col gap-2">
+            {formats.map((format) => {
+              const blocked = format.needsMux && !result.canMux
+              const busy = busyId === format.id
+              const ext = format.kind === "audio" && audioTarget ? audioTarget : format.ext
+              return (
+                <li key={format.id}>
+                  <button
+                    type="button"
+                    disabled={blocked || busy}
+                    onClick={() => startDownload(format)}
+                    className="flex w-full items-center gap-3 rounded-lg border bg-surface-2 px-3 py-3 text-left transition-colors hover:border-accent disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-border"
+                  >
+                    <span className="flex size-9 shrink-0 items-center justify-center rounded-lg border text-muted">
+                      {format.kind === "video" ? (
+                        <Video className="size-4" aria-hidden="true" />
+                      ) : (
+                        <AudioLines className="size-4" aria-hidden="true" />
+                      )}
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="flex items-center gap-2 text-sm font-semibold text-foreground">
+                        {format.label}
+                        <span className="font-mono text-[10px] uppercase tracking-widest text-muted">{ext}</span>
+                      </span>
+                      <span className="mt-0.5 block truncate font-mono text-[11px] text-muted">
+                        {blocked ? "нужен ffmpeg на сервере" : format.detail || "размер неизвестен"}
+                      </span>
+                    </span>
+                    {busy ? (
+                      <Loader2 className="size-4 shrink-0 animate-spin text-accent" aria-hidden="true" />
+                    ) : (
+                      <ArrowDownToLine className="size-4 shrink-0 text-muted" aria-hidden="true" />
+                    )}
+                  </button>
+                </li>
+              )
+            })}
+          </ul>
+
+          {formats.length === 0 && (
+            <p className="font-mono text-[11px] text-muted">В этой категории для ссылки нет доступных форматов.</p>
+          )}
         </div>
       )}
 
-      <InstanceSettings config={instance} onChange={setInstance} />
-
-      {!isTelegram && (
-        <p className="text-center font-mono text-[11px] text-muted">
-          Открыто в браузере. Внутри Telegram загрузка идёт через нативный диалог Mini App.
+      {!result && !loading && (
+        <p className="text-center font-mono text-[11px] leading-relaxed text-muted">
+          {isTelegram
+            ? "Вставьте ссылку — файл придёт прямо в чат."
+            : "YouTube, TikTok, SoundCloud, Instagram, X, VK и ещё около двух тысяч сайтов."}
         </p>
       )}
     </section>
