@@ -1,21 +1,12 @@
 import { type NextRequest, NextResponse } from "next/server"
+import { authHeader, collectCandidates, normalizeInstanceUrl } from "@/lib/backend"
 import { detectService, isValidUrl, normalizeUrl } from "@/lib/services"
 
 /**
- * ────────────────────────────────────────────────────────────────────────────
- *  НАСТРОЙКА БЭКЕНДА
- * ────────────────────────────────────────────────────────────────────────────
- *  Приложение общается с cobalt-совместимым API (v10+).
- *  Добавьте в переменные окружения проекта:
- *
- *    COBALT_API_URL   — адрес инстанса, например https://cobalt.example.com
- *    COBALT_API_KEY   — ключ доступа (если инстанс требует авторизацию)
- *
- *  Как получить — смотрите README.md в корне проекта.
- * ────────────────────────────────────────────────────────────────────────────
+ * Приложение общается с cobalt-совместимым API (v10+).
+ * Адрес инстанса можно ввести прямо в интерфейсе — либо задать через
+ * переменные окружения. Подробнее: lib/backend.ts и README.md.
  */
-const COBALT_API_URL = process.env.COBALT_API_URL
-const COBALT_API_KEY = process.env.COBALT_API_KEY
 
 type CobaltRequest = {
   url: string
@@ -60,7 +51,7 @@ function humanizeError(code: string | undefined): string {
 }
 
 export async function POST(request: NextRequest) {
-  let body: Partial<CobaltRequest> & { url?: string }
+  let body: Partial<CobaltRequest> & { url?: string; instance?: string; apiKey?: string }
   try {
     body = await request.json()
   } catch {
@@ -79,13 +70,13 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ ok: false, message: service.note }, { status: 422 })
   }
 
-  if (!COBALT_API_URL) {
+  const candidates = collectCandidates(body.instance, body.apiKey)
+  if (candidates.length === 0) {
     return NextResponse.json(
       {
         ok: false,
         needsSetup: true,
-        message:
-          "Бэкенд не настроен: добавьте переменную окружения COBALT_API_URL (и при необходимости COBALT_API_KEY). Инструкция — в README.md.",
+        message: "Инстанс не указан. Откройте «Настройки инстанса» ниже и впишите адрес сервера cobalt.",
       },
       { status: 503 },
     )
@@ -101,40 +92,65 @@ export async function POST(request: NextRequest) {
     filenameStyle: "pretty",
   }
 
-  const headers: Record<string, string> = {
-    Accept: "application/json",
-    "Content-Type": "application/json",
-    "User-Agent": "OpenDownload/1.0",
-  }
-  if (COBALT_API_KEY) {
-    headers.Authorization = COBALT_API_KEY.startsWith("Api-Key ") ? COBALT_API_KEY : `Api-Key ${COBALT_API_KEY}`
-  }
+  // Ошибки, при которых имеет смысл попробовать следующий инстанс из списка.
+  const RETRYABLE = new Set([
+    "error.api.auth.key.missing",
+    "error.api.auth.key.invalid",
+    "error.api.auth.key.not_found",
+    "error.api.auth.jwt.missing",
+    "error.api.auth.turnstile.missing",
+    "error.api.rate_exceeded",
+    "error.api.fetch.rate",
+    "error.api.service.disabled",
+    "error.api.service.unsupported",
+  ])
 
-  try {
-    const upstream = await fetch(COBALT_API_URL.replace(/\/+$/, "") + "/", {
-      method: "POST",
-      headers,
-      body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(30_000),
-      cache: "no-store",
-    })
+  let lastMessage = "Ни один инстанс не ответил."
 
-    const text = await upstream.text()
+  for (const candidate of candidates) {
+    const normalized = await normalizeInstanceUrl(candidate.url)
+    if (!normalized.ok) {
+      lastMessage = normalized.message
+      continue
+    }
+
     let data: any
     try {
-      data = JSON.parse(text)
-    } catch {
-      console.log("[v0] non-json upstream response:", upstream.status, text.slice(0, 200))
-      return NextResponse.json(
-        { ok: false, message: `Инстанс ответил не в формате JSON (HTTP ${upstream.status}). Проверьте COBALT_API_URL.` },
-        { status: 502 },
-      )
+      const upstream = await fetch(normalized.url + "/", {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+          "User-Agent": "OpenDownload/1.0",
+          ...authHeader(candidate.apiKey),
+        },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(30_000),
+        cache: "no-store",
+      })
+
+      const text = await upstream.text()
+      try {
+        data = JSON.parse(text)
+      } catch {
+        console.log("[v0] non-json response:", upstream.status, text.slice(0, 200))
+        lastMessage = `По адресу ${normalized.url} отвечает не cobalt (HTTP ${upstream.status}).`
+        continue
+      }
+    } catch (error) {
+      const timedOut = error instanceof Error && error.name === "TimeoutError"
+      lastMessage = timedOut
+        ? `Инстанс ${normalized.url} не ответил за 30 секунд.`
+        : `Инстанс ${normalized.url} недоступен.`
+      continue
     }
 
     if (data?.status === "error") {
       const code = data?.error?.code as string | undefined
       console.log("[v0] upstream error:", code)
-      return NextResponse.json({ ok: false, message: humanizeError(code), code }, { status: 422 })
+      lastMessage = humanizeError(code)
+      if (code && RETRYABLE.has(code)) continue
+      return NextResponse.json({ ok: false, message: lastMessage, code }, { status: 422 })
     }
 
     if (data?.status === "tunnel" || data?.status === "redirect") {
@@ -144,6 +160,7 @@ export async function POST(request: NextRequest) {
         url: data.url as string,
         filename: (data.filename as string) ?? "download",
         service: service.label,
+        instance: normalized.url,
       })
     }
 
@@ -160,6 +177,7 @@ export async function POST(request: NextRequest) {
           filename: `${index + 1}`,
         })),
         service: service.label,
+        instance: normalized.url,
       })
     }
 
@@ -173,19 +191,15 @@ export async function POST(request: NextRequest) {
           url: first as string,
           filename: data?.output?.filename ?? "download",
           service: service.label,
+          instance: normalized.url,
           raw: true,
         })
       }
     }
 
-    console.log("[v0] unexpected upstream payload:", JSON.stringify(data).slice(0, 300))
-    return NextResponse.json({ ok: false, message: "Неожиданный ответ инстанса." }, { status: 502 })
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "unknown"
-    console.log("[v0] upstream request failed:", message)
-    return NextResponse.json(
-      { ok: false, message: "Не удалось связаться с инстансом. Проверьте COBALT_API_URL и доступность сервера." },
-      { status: 502 },
-    )
+    console.log("[v0] unexpected payload:", JSON.stringify(data).slice(0, 300))
+    lastMessage = "Инстанс вернул неожиданный ответ."
   }
+
+  return NextResponse.json({ ok: false, message: lastMessage }, { status: 502 })
 }

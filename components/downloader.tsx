@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from "react"
 import { AlertCircle, ArrowDownToLine, CheckCircle2, Link2, Loader2, Music4, Video } from "lucide-react"
+import { type InstanceConfig, InstanceSettings } from "@/components/instance-settings"
 import { OptionRow } from "@/components/option-row"
 import { useTelegram } from "@/lib/use-telegram"
 import {
@@ -32,6 +33,7 @@ export function Downloader() {
   const [videoCodec, setVideoCodec] = useState("h264")
   const [audioFormat, setAudioFormat] = useState("mp3")
   const [audioBitrate, setAudioBitrate] = useState("320")
+  const [instance, setInstance] = useState<InstanceConfig>({ url: "", apiKey: "" })
   const [loading, setLoading] = useState(false)
   const [feedback, setFeedback] = useState<Feedback>(null)
   const [result, setResult] = useState<Result | null>(null)
@@ -62,6 +64,8 @@ export function Downloader() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           url,
+          instance: instance.url,
+          apiKey: instance.apiKey,
           downloadMode: effectiveMode === "audio" ? "audio" : "auto",
           videoQuality,
           youtubeVideoCodec: videoCodec,
@@ -264,6 +268,8 @@ export function Downloader() {
           </div>
         </div>
       )}
+
+      <InstanceSettings config={instance} onChange={setInstance} />
 
       {!isTelegram && (
         <p className="text-center font-mono text-[11px] text-muted">
