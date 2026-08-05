@@ -129,9 +129,50 @@ export async function GET(request: NextRequest) {
 
   const source = encoder ?? child
 
+  // Ждём первый байт: пока ответ не начат, ошибку ещё можно отдать статусом и текстом,
+  // иначе пользователь получил бы пустой файл с кодом 200.
+  const firstChunk = await new Promise<Buffer | null>((resolve) => {
+    const onData = (chunk: Buffer) => {
+      source.stdout!.pause()
+      cleanup()
+      resolve(chunk)
+    }
+    const onEnd = () => {
+      cleanup()
+      resolve(null)
+    }
+    const cleanup = () => {
+      source.stdout!.off("data", onData)
+      source.stdout!.off("end", onEnd)
+      source.off("close", onEnd)
+      source.off("error", onEnd)
+    }
+    source.stdout!.on("data", onData)
+    source.stdout!.on("end", onEnd)
+    source.on("close", onEnd)
+    source.on("error", onEnd)
+  })
+
+  if (!firstChunk) {
+    child.kill("SIGKILL")
+    encoder?.kill("SIGKILL")
+    console.log("[v0] download produced no data:", stderr.slice(0, 400))
+    const notAvailable = /Requested format is not available/i.test(stderr)
+    return NextResponse.json(
+      {
+        ok: false,
+        message: notAvailable
+          ? "Это качество больше недоступно — обновите список форматов."
+          : "Сервер не смог получить файл. Попробуйте другое качество.",
+      },
+      { status: 502 },
+    )
+  }
+
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
       let closed = false
+      controller.enqueue(new Uint8Array(firstChunk))
       const finish = (error?: Error) => {
         if (closed) return
         closed = true
@@ -164,6 +205,9 @@ export async function GET(request: NextRequest) {
         killAll()
         finish()
       })
+
+      // Поток был остановлен, пока мы ждали первый байт.
+      source.stdout!.resume()
     },
     cancel() {
       child.kill("SIGKILL")

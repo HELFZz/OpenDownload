@@ -20,6 +20,8 @@ export type ServiceInfo = {
   video: boolean
   /** Поддерживает ли извлечение аудио */
   audio: boolean
+  /** Поток защищён DRM — скачивание невозможно */
+  drm?: boolean
   note?: string
 }
 
@@ -56,6 +58,7 @@ export const SERVICE_META: Record<ServiceId, ServiceInfo> = {
     label: "Стриминг с DRM",
     video: false,
     audio: false,
+    drm: true,
     note: "Аудио на Spotify / Apple Music / Deezer / Tidal защищено DRM и не может быть извлечено. Вставьте ссылку на трек с SoundCloud или YouTube Music.",
   },
   unknown: { id: "unknown", label: "Ссылка", video: true, audio: true },
@@ -92,36 +95,3 @@ export function isValidUrl(raw: string): boolean {
     return false
   }
 }
-
-export const VIDEO_QUALITIES = [
-  { value: "max", label: "Max" },
-  { value: "2160", label: "4K" },
-  { value: "1440", label: "1440p" },
-  { value: "1080", label: "1080p" },
-  { value: "720", label: "720p" },
-  { value: "480", label: "480p" },
-  { value: "360", label: "360p" },
-  { value: "144", label: "144p" },
-] as const
-
-export const AUDIO_FORMATS = [
-  { value: "mp3", label: "MP3" },
-  { value: "opus", label: "Opus" },
-  { value: "ogg", label: "OGG" },
-  { value: "wav", label: "WAV" },
-  { value: "best", label: "Original" },
-] as const
-
-export const AUDIO_BITRATES = [
-  { value: "320", label: "320 kbps" },
-  { value: "256", label: "256 kbps" },
-  { value: "128", label: "128 kbps" },
-  { value: "96", label: "96 kbps" },
-  { value: "64", label: "64 kbps" },
-] as const
-
-export const VIDEO_CODECS = [
-  { value: "h264", label: "H.264" },
-  { value: "vp9", label: "VP9" },
-  { value: "av1", label: "AV1" },
-] as const

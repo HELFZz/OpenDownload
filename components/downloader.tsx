@@ -103,7 +103,10 @@ export function Downloader() {
       if (info.isLive) {
         setFeedback({ tone: "info", text: "Это прямой эфир: запись пойдёт с текущего момента, остановите её вручную." })
       } else if (!data.canMux) {
-        setFeedback({ tone: "info", text: "ffmpeg недоступен: качества со отдельной звуковой дорожкой и конвертация выключены." })
+        setFeedback({
+          tone: "info",
+          text: "ffmpeg недоступен: качества с отдельной звуковой дорожкой и конвертация выключены.",
+        })
       } else {
         setFeedback({ tone: "success", text: "Форматы готовы — выберите нужный." })
       }
@@ -278,7 +281,8 @@ export function Downloader() {
             {formats.map((format) => {
               const blocked = format.needsMux && !result.canMux
               const busy = busyId === format.id
-              const ext = format.kind === "audio" && audioTarget ? audioTarget : format.ext
+              const converting = format.kind === "audio" && Boolean(audioTarget)
+              const ext = converting ? audioTarget : format.ext
               return (
                 <li key={format.id}>
                   <button
@@ -300,7 +304,12 @@ export function Downloader() {
                         <span className="font-mono text-[10px] uppercase tracking-widest text-muted">{ext}</span>
                       </span>
                       <span className="mt-0.5 block truncate font-mono text-[11px] text-muted">
-                        {blocked ? "нужен ffmpeg на сервере" : format.detail || "размер неизвестен"}
+                        {blocked
+                          ? "нужен ffmpeg на сервере"
+                          : converting
+                            ? // При перекодировке размер исходника — только ориентир.
+                              `источник ${format.detail}`
+                            : format.detail || "размер неизвестен"}
                       </span>
                     </span>
                     {busy ? (
