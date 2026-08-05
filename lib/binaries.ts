@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process"
-import { chmod, mkdir, rename, stat } from "node:fs/promises"
-import { createWriteStream } from "node:fs"
+import { access, chmod, copyFile, mkdir, rename, stat } from "node:fs/promises"
+import { constants, createWriteStream } from "node:fs"
 import { createRequire } from "node:module"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -96,6 +96,31 @@ export function getYtDlp(): Promise<string> {
   return ytdlpPromise
 }
 
+/**
+ * В serverless-бандле (Vercel) файлы распаковываются без бита +x, а сам каталог
+ * функции только для чтения. Поэтому такой бинарник копируем в /tmp и там метим
+ * исполняемым — иначе spawn падает с EACCES.
+ */
+async function ensureExecutable(path: string, name: string): Promise<string> {
+  try {
+    await access(path, constants.X_OK)
+    return path
+  } catch {
+    // бит +x отсутствует — готовим копию в /tmp
+  }
+
+  const target = join(CACHE_DIR, name)
+  if (await isExecutable(target)) return target
+
+  console.log("[v0] copying binary to tmp for exec:", name)
+  await mkdir(CACHE_DIR, { recursive: true })
+  const partial = `${target}.${process.pid}.part`
+  await copyFile(path, partial)
+  await chmod(partial, 0o755)
+  await rename(partial, target)
+  return target
+}
+
 /** Путь к ffmpeg — нужен для склейки видео с аудио и конвертации в mp3. */
 export async function getFfmpeg(): Promise<string | null> {
   if (process.env.FFMPEG_PATH) return process.env.FFMPEG_PATH
@@ -104,7 +129,9 @@ export async function getFfmpeg(): Promise<string | null> {
     const require = createRequire(import.meta.url)
     const resolved = require("ffmpeg-static") as string | { default?: string }
     const path = typeof resolved === "string" ? resolved : resolved?.default
-    if (path && (await isExecutable(path))) return path
+    if (path && (await isExecutable(path))) {
+      return await ensureExecutable(path, process.platform === "win32" ? "ffmpeg.exe" : "ffmpeg")
+    }
   } catch (error) {
     console.log("[v0] ffmpeg-static unavailable:", error instanceof Error ? error.message : error)
   }
