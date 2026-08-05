@@ -1,5 +1,7 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  // ffmpeg-static указывает на бинарник на диске — бандлить его нельзя.
+  serverExternalPackages: ["ffmpeg-static"],
   async headers() {
     return [
       {
