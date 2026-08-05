@@ -1,7 +1,8 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  // ffmpeg-static указывает на бинарник на диске — бандлить его нельзя.
-  serverExternalPackages: ["ffmpeg-static"],
+  // serverExternalPackages здесь не используется намеренно: он заставляет Next создать
+  // .next/node_modules/ffmpeg-static-<хеш> как симлинк, а Vercel отклоняет бандл функции
+  // с симлинками («invalid deployment package for a Serverless Function»).
   // Путь к ffmpeg вычисляется через createRequire, поэтому трейсер его не видит.
   // Без этого на Vercel в функцию попадёт только index.js без самого бинарника.
   outputFileTracingIncludes: {

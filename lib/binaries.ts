@@ -135,6 +135,14 @@ export async function getFfmpeg(): Promise<string | null> {
   } catch (error) {
     console.log("[v0] ffmpeg-static unavailable:", error instanceof Error ? error.message : error)
   }
+
+  // Запасной путь: в serverless-бандле разрешение по имени пакета может не сработать,
+  // но сам файл лежит рядом благодаря outputFileTracingIncludes.
+  const bundled = join(process.cwd(), "node_modules", "ffmpeg-static", "ffmpeg")
+  if (await isExecutable(bundled)) {
+    return await ensureExecutable(bundled, "ffmpeg")
+  }
+
   try {
     await execFileAsync("ffmpeg", ["-version"], { timeout: 15_000 })
     return "ffmpeg"
